@@ -1,10 +1,12 @@
-Name: Build APK
+name: Build APK
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,7 +16,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Criar projeto Android
+      - name: 1. Criar arquivos de configuração e Prefs
         run: |
           mkdir -p app/src/main/java/com/meu/autoclicker app/src/main/res/xml app/src/main/res/values
           cat > settings.gradle.kts <<'KT_EOF'
@@ -128,7 +130,6 @@ jobs:
           import android.content.Context
 
           object Prefs {
-              // chave, rótulo, valor padrão
               val fields = listOf(
                   Triple("interval", "Intervalo entre toques (ms)", 500L),
                   Triple("random", "Variação aleatória do intervalo (± ms)", 0L),
@@ -150,7 +151,8 @@ jobs:
                   sp(c).edit().putLong(key, v).apply()
               }
           }
-          KT_EOF
+                - name: 2. Criar tela principal (MainActivity)
+        run: |
           cat > app/src/main/java/com/meu/autoclicker/MainActivity.kt <<'KT_EOF'
           package com.meu.autoclicker
 
@@ -278,6 +280,8 @@ jobs:
               }
           }
           KT_EOF
+                - name: 3. Criar ClickService, Compilar e Publicar
+        run: |
           cat > app/src/main/java/com/meu/autoclicker/ClickService.kt <<'KT_EOF'
           package com.meu.autoclicker
 
@@ -356,8 +360,6 @@ jobs:
                   instance = null
                   super.onDestroy()
               }
-
-              // ---------- Painel flutuante ----------
 
               private fun tv(t: String): TextView {
                   val v = TextView(this)
@@ -478,8 +480,6 @@ jobs:
               private fun toast(t: String) {
                   Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
               }
-
-              // ---------- Marcadores ----------
 
               private fun makeMarker(label: String, color: Int, x: Int, y: Int): TextView {
                   val size = markerSize()
@@ -619,8 +619,6 @@ jobs:
                   }
               }
 
-              // ---------- Execução ----------
-
               private fun startRun() {
                   if (acts.isEmpty()) {
                       toast("Adicione um ponto primeiro (👆 ou ↔)")
@@ -748,5 +746,6 @@ jobs:
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk AutoClicker.apk
           gh release create "v${{ github.run_number }}" AutoClicker.apk --title "Auto Clicker v${{ github.run_number }}" --notes "APK pronto para instalar"
-
-              
+          
+          
+          KT_EOF
