@@ -1,0 +1,1127 @@
+name: Build APK Confiável
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # A chave de assinatura fica em cache: assim todas as versões usam a mesma
+      # assinatura e o app pode ser atualizado sem desinstalar.
+      - name: Restaurar chave de assinatura
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/release-key.jks
+            app/release-key.pass
+          key: autoclicker-keystore-v1
+
+      - name: Criar projeto Android Seguro e Confiável
+        run: |
+          mkdir -p app/src/main/java/com/meu/autoclicker app/src/main/res/xml app/src/main/res/values
+
+          # Senha aleatória (nada de senha fixa no código) + keystore gerado só uma vez
+          if [ ! -f app/release-key.jks ] || [ ! -f app/release-key.pass ]; then
+            rm -f app/release-key.jks
+            openssl rand -hex 16 > app/release-key.pass
+            keytool -genkey -keystore app/release-key.jks -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias autoclicker_alias -storepass "$(cat app/release-key.pass)" -keypass "$(cat app/release-key.pass)" \
+              -dname "CN=AutoClicker Pro, OU=Development, O=Trusted, L=Brasil, ST=SP, C=BR"
+          fi
+          echo "KS_PASS=$(cat app/release-key.pass)" >> "$GITHUB_ENV"
+
+          cat > settings.gradle.kts <<'KT_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AutoClickerPro"
+          include(":app")
+          KT_EOF
+
+          cat > build.gradle.kts <<'KT_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          KT_EOF
+
+          cat > gradle.properties <<'KT_EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          KT_EOF
+
+          cat > app/proguard-rules.pro <<'KT_EOF'
+          -keep class com.meu.autoclicker.** { * }
+          -dontwarn com.meu.autoclicker.**
+          KT_EOF
+
+          cat > app/build.gradle.kts <<'KT_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.meu.autoclicker"
+              compileSdk = 34
+
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("release-key.jks")
+                      storePassword = System.getenv("KS_PASS")
+                      keyAlias = "autoclicker_alias"
+                      keyPassword = System.getenv("KS_PASS")
+                  }
+              }
+
+              defaultConfig {
+                  applicationId = "com.meu.autoclicker"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+
+              lint {
+                  abortOnError = false
+                  checkReleaseBuilds = false
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/ic_menu_compass"
+                  android:label="Auto Clicker Pro"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ClickService"
+                      android:exported="true"
+                      android:label="Auto Clicker Pro"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          KT_EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canPerformGestures="true"
+              android:canRetrieveWindowContent="false"
+              android:description="@string/service_desc"
+              android:notificationTimeout="100" />
+          KT_EOF
+
+          cat > app/src/main/res/values/strings.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="service_desc">Executa toques e deslizes automáticos. Não lê o conteúdo da tela, não acessa a internet e possui parada de emergência, limite de tempo e bloqueio de apps sensíveis.</string>
+          </resources>
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/Prefs.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.content.Context
+
+          object Prefs {
+              val fields = listOf(
+                  Triple("interval", "Intervalo padrão entre toques (ms)", 500L),
+                  Triple("random", "Variação aleatória do intervalo (± ms)", 0L),
+                  Triple("repeats", "Repetições do ciclo (0 = infinito)", 0L),
+                  Triple("tapDur", "Duração padrão do toque (ms)", 50L),
+                  Triple("swipeDur", "Duração padrão do deslize (ms)", 400L),
+                  Triple("startDelay", "Atraso antes de começar (ms)", 1000L),
+                  Triple("jitter", "Variação aleatória de posição / Jitter (px)", 0L),
+                  Triple("maxMinutes", "Tempo máximo de execução (min, 0 = sem limite)", 30L),
+                  Triple("safeMode", "Modo seguro: bloquear apps sensíveis (1 = ligado, 0 = desligado)", 1L)
+              )
+
+              val safetyKeys = setOf("maxMinutes", "safeMode")
+
+              // Limites válidos: valores absurdos são corrigidos automaticamente ao salvar
+              fun range(key: String): LongRange = when (key) {
+                  "interval" -> 10L..600000L
+                  "random" -> 0L..60000L
+                  "repeats" -> 0L..1000000L
+                  "tapDur" -> 1L..10000L
+                  "swipeDur" -> 1L..10000L
+                  "startDelay" -> 0L..60000L
+                  "jitter" -> 0L..200L
+                  "maxMinutes" -> 0L..1440L
+                  "safeMode" -> 0L..1L
+                  else -> 0L..Long.MAX_VALUE
+              }
+
+              private fun sp(c: Context) = c.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+
+              fun get(c: Context, key: String): Long {
+                  val def = fields.firstOrNull { it.first == key }?.third ?: 0L
+                  return sp(c).getLong(key, def)
+              }
+
+              fun set(c: Context, key: String, v: Long) {
+                  val r = range(key)
+                  sp(c).edit().putLong(key, v.coerceIn(r.first, r.last)).apply()
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/MainActivity.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              private val inputs = LinkedHashMap<String, EditText>()
+              private lateinit var status: TextView
+
+              private val cBg = Color.parseColor("#0E1116")
+              private val cCard = Color.parseColor("#171B22")
+              private val cStroke = Color.parseColor("#262C36")
+              private val cAccent = Color.parseColor("#4C8DFF")
+              private val cGreen = Color.parseColor("#3DDC84")
+              private val cRed = Color.parseColor("#FF5C5C")
+              private val cText = Color.parseColor("#ECEFF4")
+              private val cMuted = Color.parseColor("#8B95A5")
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun rounded(color: Int, radius: Int, strokeW: Int = 0, strokeC: Int = 0): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(color)
+                  g.cornerRadius = dp(radius).toFloat()
+                  if (strokeW > 0) g.setStroke(dp(strokeW), strokeC)
+                  return g
+              }
+
+              private fun params(top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams {
+                  val lp = LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  )
+                  lp.setMargins(0, dp(top), 0, dp(bottom))
+                  return lp
+              }
+
+              private fun card(): LinearLayout {
+                  val c = LinearLayout(this)
+                  c.orientation = LinearLayout.VERTICAL
+                  c.background = rounded(cCard, 16, 1, cStroke)
+                  c.setPadding(dp(16), dp(14), dp(16), dp(16))
+                  c.layoutParams = params(0, 14)
+                  return c
+              }
+
+              private fun text(t: String, size: Float, color: Int, bold: Boolean = false): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = size
+                  v.setTextColor(color)
+                  if (bold) v.typeface = Typeface.DEFAULT_BOLD
+                  return v
+              }
+
+              private fun button(t: String, color: Int, textColor: Int, onClick: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = t
+                  b.isAllCaps = false
+                  b.textSize = 15f
+                  b.typeface = Typeface.DEFAULT_BOLD
+                  b.setTextColor(textColor)
+                  b.background = rounded(color, 12)
+                  b.stateListAnimator = null
+                  b.layoutParams = params(10, 0)
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = cBg
+                  window.navigationBarColor = cBg
+
+                  val scroll = ScrollView(this)
+                  scroll.setBackgroundColor(cBg)
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(18), dp(36), dp(18), dp(30))
+                  scroll.addView(root)
+                  setContentView(scroll)
+
+                  // Cabeçalho
+                  val title = text("Auto Clicker Pro", 28f, cText, true)
+                  root.addView(title)
+                  val sub = text("Toques, deslizes e macros automáticos com segurança profissional", 13f, cMuted)
+                  sub.setPadding(0, dp(2), 0, dp(16))
+                  root.addView(sub)
+
+                  // Cartão de status
+                  val stCard = card()
+                  stCard.addView(text("STATUS DO SERVIÇO", 11f, cMuted, true))
+                  status = text("", 17f, cText, true)
+                  status.setPadding(0, dp(6), 0, 0)
+                  stCard.addView(status)
+                  root.addView(stCard)
+
+                  // Cartão de passos
+                  val stepCard = card()
+                  stepCard.addView(text("COMEÇAR", 11f, cMuted, true))
+                  stepCard.addView(button("1. Ativar Serviço de Acessibilidade", cAccent, Color.WHITE) {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+                  stepCard.addView(button("2. Abrir Painel Flutuante", cGreen, Color.parseColor("#06210F")) {
+                      saveAll()
+                      val s = ClickService.instance
+                      if (s == null) {
+                          Toast.makeText(this, "Ative o serviço de acessibilidade primeiro", Toast.LENGTH_LONG).show()
+                      } else {
+                          s.showPanel()
+                          moveTaskToBack(true)
+                      }
+                  })
+                  root.addView(stepCard)
+
+                  // Cartão de configurações + cartão de segurança
+                  val cfgCard = card()
+                  cfgCard.addView(text("CONFIGURAÇÕES", 11f, cMuted, true))
+                  val safeCard = card()
+                  safeCard.addView(text("SEGURANÇA", 11f, cMuted, true))
+
+                  for (f in Prefs.fields) {
+                      val target = if (f.first in Prefs.safetyKeys) safeCard else cfgCard
+                      val label = text(f.second, 13f, cText)
+                      label.setPadding(0, dp(12), 0, dp(4))
+                      target.addView(label)
+
+                      val et = EditText(this)
+                      et.inputType = InputType.TYPE_CLASS_NUMBER
+                      et.setText(Prefs.get(this, f.first).toString())
+                      et.setTextColor(cText)
+                      et.textSize = 15f
+                      et.background = rounded(Color.parseColor("#0E1116"), 10, 1, cStroke)
+                      et.setPadding(dp(12), dp(10), dp(12), dp(10))
+                      et.layoutParams = params()
+                      target.addView(et)
+                      inputs[f.first] = et
+                  }
+
+                  val info = text(
+                      "🛡️ Proteções ativas:\n" +
+                          "• Chacoalhe o celular para parar na hora\n" +
+                          "• Para automaticamente se a tela desligar\n" +
+                          "• Limite de tempo de execução\n" +
+                          "• Bloqueia apps de banco, pagamentos, loja e configurações\n" +
+                          "• O app não lê a tela e não usa internet\n" +
+                          "• Sem backup e com assinatura digital própria",
+                      12f, cMuted
+                  )
+                  info.setPadding(0, dp(14), 0, 0)
+                  safeCard.addView(info)
+
+                  root.addView(cfgCard)
+                  root.addView(safeCard)
+
+                  val save = button("Salvar Configurações", cAccent, Color.WHITE) {
+                      saveAll()
+                      Toast.makeText(this, "Salvo com sucesso!", Toast.LENGTH_SHORT).show()
+                  }
+                  save.gravity = Gravity.CENTER
+                  root.addView(save)
+              }
+
+              private fun saveAll() {
+                  for (f in Prefs.fields) {
+                      val v = inputs[f.first]?.text?.toString()?.toLongOrNull() ?: f.third
+                      Prefs.set(this, f.first, v)
+                      inputs[f.first]?.setText(Prefs.get(this, f.first).toString())
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (ClickService.instance != null) {
+                      status.text = "● Serviço de Segurança & Acessibilidade: ATIVO"
+                      status.setTextColor(cGreen)
+                  } else {
+                      status.text = "● Serviço desativado"
+                      status.setTextColor(cRed)
+                  }
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/ClickService.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.graphics.Color
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.Sensor
+          import android.hardware.SensorEvent
+          import android.hardware.SensorEventListener
+          import android.hardware.SensorManager
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.os.Vibrator
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import kotlin.math.sqrt
+          import kotlin.random.Random
+
+          class ClickService : AccessibilityService(), SensorEventListener {
+
+              companion object {
+                  @Volatile
+                  var instance: ClickService? = null
+
+                  // Apps onde o auto clicker nunca deve rodar no modo seguro
+                  private val BLOCKED = setOf(
+                      "com.android.settings",
+                      "com.android.packageinstaller",
+                      "com.google.android.packageinstaller",
+                      "com.android.vending",
+                      "com.google.android.gms",
+                      "com.google.android.apps.walletnfcrel",
+                      "com.google.android.apps.nbu.paisa.user",
+                      "com.google.android.apps.authenticator2",
+                      "com.nu.production",
+                      "com.itau",
+                      "com.bradesco",
+                      "br.com.bb.android",
+                      "com.mercadopago.wallet",
+                      "com.picpay",
+                      "com.paypal.android.p2pmobile"
+                  )
+              }
+
+              class Act(
+                  val swipe: Boolean,
+                  val a: TextView,
+                  val b: TextView?,
+                  var customDelay: Long = -1L,
+                  var customDuration: Long = -1L
+              )
+
+              class MacroStep(val path: Path, val duration: Long, var delayAfter: Long = 500L)
+
+              private lateinit var wm: WindowManager
+              private val handler = Handler(Looper.getMainLooper())
+              private val acts = ArrayList<Act>()
+              private val macroSteps = ArrayList<MacroStep>()
+
+              private var panel: View? = null
+              private var panelLp: WindowManager.LayoutParams? = null
+              private var playBtn: TextView? = null
+              private var recBtn: TextView? = null
+              private var recordingOverlay: View? = null
+
+              private var running = false
+              private var recording = false
+              private var runGen = 0
+              private var idx = 0
+              private var cycles = 0
+              private var runStart = 0L
+
+              private var sensorManager: SensorManager? = null
+              private var accelerometer: Sensor? = null
+              private var shakeOn = false
+              private var lastShakeTime = 0L
+              private var currentPkg = ""
+              private var receiverOn = false
+
+              private val screenReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context?, i: Intent?) {
+                      if (running || recording) {
+                          stopRun()
+                          stopRecording()
+                          toast("🔒 Tela desligada: auto clicker parado")
+                      }
+                  }
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun markerSize() = dp(52)
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+                  sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+                  accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
+                  if (!receiverOn) {
+                      registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
+                      receiverOn = true
+                  }
+              }
+
+              // Sensor só fica ligado enquanto algo está rodando (economiza bateria)
+              private fun enableShake() {
+                  if (shakeOn) return
+                  accelerometer?.let {
+                      sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+                      shakeOn = true
+                  }
+              }
+
+              private fun disableShake() {
+                  if (!shakeOn) return
+                  sensorManager?.unregisterListener(this)
+                  shakeOn = false
+              }
+
+              override fun onSensorChanged(event: SensorEvent?) {
+                  if (event == null) return
+                  val x = event.values[0] / 9.80665
+                  val y = event.values[1] / 9.80665
+                  val z = event.values[2] / 9.80665
+                  val gForce = sqrt(x * x + y * y + z * z)
+
+                  if (gForce > 2.7) {
+                      val now = System.currentTimeMillis()
+                      if (now - lastShakeTime > 1500) {
+                          lastShakeTime = now
+                          if (running || recording) {
+                              stopRun()
+                              stopRecording()
+                              toast("🛡️ Parada de Emergência: Agitação detectada!")
+                              buzz(200)
+                          }
+                      }
+                  }
+              }
+
+              override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+              private fun isBlocked(pkg: String): Boolean {
+                  if (Prefs.get(this, "safeMode") != 1L) return false
+                  if (pkg.isEmpty()) return false
+                  return pkg in BLOCKED || pkg.contains("bank") || pkg.contains("banco") || pkg.contains("wallet")
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val pkg = event.packageName?.toString() ?: return
+                  if (pkg == packageName) return
+                  currentPkg = pkg
+                  if (running && isBlocked(pkg)) {
+                      stopRun()
+                      toast("🛡️ Modo seguro: app sensível detectado, parado")
+                      buzz(200)
+                  }
+              }
+
+              override fun onInterrupt() {
+                  stopRun()
+                  stopRecording()
+              }
+
+              private fun cleanup() {
+                  closeAll()
+                  disableShake()
+                  if (receiverOn) {
+                      try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+                      receiverOn = false
+                  }
+                  instance = null
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  cleanup()
+                  return super.onUnbind(intent)
+              }
+
+              override fun onDestroy() {
+                  cleanup()
+                  super.onDestroy()
+              }
+
+              @Suppress("DEPRECATION")
+              private fun buzz(ms: Long) {
+                  try {
+                      (getSystemService(Context.VIBRATOR_SERVICE) as Vibrator).vibrate(ms)
+                  } catch (_: Exception) {}
+              }
+
+              private fun roundBtn(t: String, color: Int): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = 16f
+                  v.setTextColor(Color.WHITE)
+                  v.gravity = Gravity.CENTER
+                  val bg = GradientDrawable()
+                  bg.shape = GradientDrawable.OVAL
+                  bg.setColor(color)
+                  v.background = bg
+                  val lp = LinearLayout.LayoutParams(dp(40), dp(40))
+                  lp.setMargins(dp(3), 0, dp(3), 0)
+                  v.layoutParams = lp
+                  return v
+              }
+
+              fun showPanel() {
+                  if (panel != null) return
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  val bg = GradientDrawable()
+                  bg.setColor(Color.argb(245, 18, 22, 29))
+                  bg.cornerRadius = dp(30).toFloat()
+                  bg.setStroke(dp(1), Color.argb(255, 48, 56, 70))
+                  row.background = bg
+                  row.setPadding(dp(8), dp(6), dp(8), dp(6))
+
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(16)
+                  lp.y = dp(200)
+
+                  val handle = roundBtn("☰", Color.rgb(48, 56, 70))
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+                  handle.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX
+                              downY = e.rawY
+                              startX = lp.x
+                              startY = lp.y
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = startX + (e.rawX - downX).toInt()
+                              lp.y = startY + (e.rawY - downY).toInt()
+                              try { wm.updateViewLayout(row, lp) } catch (_: Exception) {}
+                          }
+                      }
+                      true
+                  }
+                  row.addView(handle)
+
+                  val play = roundBtn("▶", Color.rgb(46, 160, 90))
+                  play.setOnClickListener { if (running) stopRun() else startRun() }
+                  playBtn = play
+                  row.addView(play)
+
+                  val rec = roundBtn("⏺", Color.rgb(200, 60, 60))
+                  rec.setOnClickListener { if (recording) stopRecording() else startRecording() }
+                  recBtn = rec
+                  row.addView(rec)
+
+                  val tap = roundBtn("👆", Color.rgb(33, 120, 220))
+                  tap.setOnClickListener { addTap() }
+                  row.addView(tap)
+
+                  val swipe = roundBtn("↔", Color.rgb(33, 120, 220))
+                  swipe.setOnClickListener { addSwipe() }
+                  row.addView(swipe)
+
+                  val del = roundBtn("🗑", Color.rgb(48, 56, 70))
+                  del.setOnClickListener { removeLast() }
+                  del.setOnLongClickListener {
+                      if (!running && !recording) {
+                          clearAll()
+                          macroSteps.clear()
+                          toast("Todos os pontos e macros apagados")
+                      }
+                      true
+                  }
+                  row.addView(del)
+
+                  val cfg = roundBtn("⚙", Color.rgb(48, 56, 70))
+                  cfg.setOnClickListener {
+                      val i = Intent(this, MainActivity::class.java)
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(i)
+                  }
+                  row.addView(cfg)
+
+                  val close = roundBtn("✕", Color.rgb(48, 56, 70))
+                  close.setOnClickListener { closeAll() }
+                  row.addView(close)
+
+                  wm.addView(row, lp)
+                  panel = row
+                  panelLp = lp
+              }
+
+              private fun hidePanel() {
+                  panel?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  panel = null
+                  panelLp = null
+                  playBtn = null
+                  recBtn = null
+              }
+
+              // Mantém o painel sempre acima da camada de gravação para poder parar
+              private fun bringPanelToFront() {
+                  val p = panel ?: return
+                  val l = panelLp ?: return
+                  try {
+                      wm.removeView(p)
+                      wm.addView(p, l)
+                  } catch (_: Exception) {}
+              }
+
+              private fun closeAll() {
+                  stopRun()
+                  stopRecording()
+                  clearAll()
+                  hidePanel()
+              }
+
+              private fun toast(t: String) {
+                  Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+              }
+
+              private fun makeMarker(label: String, color: Int, x: Int, y: Int): TextView {
+                  val size = markerSize()
+                  val m = TextView(this)
+                  m.text = label
+                  m.setTextColor(Color.WHITE)
+                  m.textSize = 15f
+                  m.typeface = Typeface.DEFAULT_BOLD
+                  m.gravity = Gravity.CENTER
+                  val bg = GradientDrawable()
+                  bg.shape = GradientDrawable.OVAL
+                  bg.setColor(Color.argb(200, Color.red(color), Color.green(color), Color.blue(color)))
+                  bg.setStroke(dp(3), Color.WHITE)
+                  m.background = bg
+                  m.alpha = 0.92f
+
+                  val lp = WindowManager.LayoutParams(
+                      size, size,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = x
+                  lp.y = y
+                  m.tag = lp
+
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+                  m.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX
+                              downY = e.rawY
+                              startX = lp.x
+                              startY = lp.y
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = startX + (e.rawX - downX).toInt()
+                              lp.y = startY + (e.rawY - downY).toInt()
+                              try { wm.updateViewLayout(m, lp) } catch (_: Exception) {}
+                          }
+                      }
+                      true
+                  }
+                  wm.addView(m, lp)
+                  return m
+              }
+
+              private fun lpOf(v: View): WindowManager.LayoutParams = v.tag as WindowManager.LayoutParams
+
+              private fun addTap() {
+                  if (running || recording) {
+                      toast("Pare a execução ou gravação primeiro")
+                      return
+                  }
+                  val n = acts.size + 1
+                  val dm = resources.displayMetrics
+                  val size = markerSize()
+                  val off = (n % 5) * dp(20)
+                  val x = dm.widthPixels / 2 - size / 2 + off
+                  val y = dm.heightPixels / 2 - size / 2 + off
+                  val m = makeMarker(n.toString(), Color.rgb(33, 150, 243), x, y)
+                  acts.add(Act(false, m, null))
+              }
+
+              private fun addSwipe() {
+                  if (running || recording) {
+                      toast("Pare a execução ou gravação primeiro")
+                      return
+                  }
+                  val n = acts.size + 1
+                  val dm = resources.displayMetrics
+                  val size = markerSize()
+                  val x = dm.widthPixels / 2 - size / 2
+                  val y = dm.heightPixels / 2 - size / 2
+                  val a = makeMarker(n.toString() + "A", Color.rgb(76, 175, 80), x, y - dp(100))
+                  val b = makeMarker(n.toString() + "B", Color.rgb(244, 67, 54), x, y + dp(100))
+                  acts.add(Act(true, a, b))
+              }
+
+              private fun removeLast() {
+                  if (running || recording) return
+                  if (acts.isEmpty()) return
+                  val last = acts.removeAt(acts.size - 1)
+                  try { wm.removeView(last.a) } catch (_: Exception) {}
+                  last.b?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+              }
+
+              private fun clearAll() {
+                  for (a in acts) {
+                      try { wm.removeView(a.a) } catch (_: Exception) {}
+                      a.b?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  }
+                  acts.clear()
+              }
+
+              private fun startRecording() {
+                  if (running) return
+                  if (isBlocked(currentPkg)) {
+                      toast("🛡️ Modo seguro: gravação bloqueada neste app")
+                      return
+                  }
+                  clearAll()
+                  macroSteps.clear()
+                  recording = true
+                  enableShake()
+                  recBtn?.text = "⏹"
+                  toast("Gravando gestos... Toque e deslize na tela!")
+
+                  val overlay = View(this)
+                  overlay.setBackgroundColor(Color.argb(28, 255, 60, 60))
+                  var startTime = 0L
+                  var lastUpTime = 0L
+                  val currentPath = Path()
+
+                  overlay.setOnTouchListener { _, e ->
+                      val now = System.currentTimeMillis()
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              startTime = now
+                              // Tempo de espera real entre o fim do gesto anterior e este
+                              if (macroSteps.isNotEmpty() && lastUpTime > 0L) {
+                                  macroSteps[macroSteps.size - 1].delayAfter = (now - lastUpTime).coerceAtLeast(10L)
+                              }
+                              currentPath.reset()
+                              currentPath.moveTo(e.rawX, e.rawY)
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              currentPath.lineTo(e.rawX, e.rawY)
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                              val touchDuration = (now - startTime).coerceAtLeast(20L)
+                              lastUpTime = now
+                              macroSteps.add(MacroStep(Path(currentPath), touchDuration))
+                          }
+                      }
+                      true
+                  }
+
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  wm.addView(overlay, lp)
+                  recordingOverlay = overlay
+                  bringPanelToFront()
+              }
+
+              private fun stopRecording() {
+                  if (!recording) return
+                  recording = false
+                  recBtn?.text = "⏺"
+                  recordingOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  recordingOverlay = null
+                  if (!running) disableShake()
+                  toast("Gravação salva! (${macroSteps.size} gestos gravados)")
+              }
+
+              private fun setMarkersRunning(on: Boolean) {
+                  for (a in acts) {
+                      for (v in listOfNotNull(a.a, a.b)) {
+                          val lp = lpOf(v)
+                          if (on) {
+                              lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                              v.alpha = 0.25f
+                          } else {
+                              lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                              v.alpha = 0.92f
+                          }
+                          try { wm.updateViewLayout(v, lp) } catch (_: Exception) {}
+                      }
+                  }
+              }
+
+              private fun startRun() {
+                  if (recording) {
+                      toast("Pare a gravação primeiro")
+                      return
+                  }
+                  if (acts.isEmpty() && macroSteps.isEmpty()) {
+                      toast("Adicione pontos ou grave movimentos primeiro!")
+                      return
+                  }
+                  if (isBlocked(currentPkg)) {
+                      toast("🛡️ Modo seguro: bloqueado neste app")
+                      return
+                  }
+                  runGen++
+                  running = true
+                  idx = 0
+                  cycles = 0
+                  runStart = SystemClock.elapsedRealtime()
+                  enableShake()
+                  buzz(40)
+                  playBtn?.text = "⏸"
+                  setMarkersRunning(true)
+                  handler.postDelayed({ step() }, Prefs.get(this, "startDelay"))
+              }
+
+              private fun stopRun() {
+                  running = false
+                  runGen++
+                  handler.removeCallbacksAndMessages(null)
+                  playBtn?.text = "▶"
+                  setMarkersRunning(false)
+                  if (!recording) disableShake()
+              }
+
+              private fun step() {
+                  if (!running) return
+
+                  // Limite de tempo de segurança
+                  val maxMin = Prefs.get(this, "maxMinutes")
+                  if (maxMin > 0 && SystemClock.elapsedRealtime() - runStart > maxMin * 60_000L) {
+                      stopRun()
+                      toast("⏱ Tempo máximo de execução atingido")
+                      buzz(200)
+                      return
+                  }
+
+                  if (macroSteps.isNotEmpty()) {
+                      if (idx >= macroSteps.size) {
+                          idx = 0
+                          cycles++
+                          val maxRep = Prefs.get(this, "repeats")
+                          if (maxRep > 0 && cycles >= maxRep) {
+                              stopRun()
+                              toast("Macro concluída!")
+                              return
+                          }
+                      }
+                      val stepItem = macroSteps[idx]
+                      idx++
+                      val gen = runGen
+
+                      val gesture = GestureDescription.Builder()
+                          .addStroke(GestureDescription.StrokeDescription(stepItem.path, 0, stepItem.duration))
+                          .build()
+
+                      dispatchGesture(gesture, object : GestureResultCallback() {
+                          override fun onCompleted(g: GestureDescription?) { nextMacro(gen, stepItem.delayAfter) }
+                          override fun onCancelled(g: GestureDescription?) { nextMacro(gen, stepItem.delayAfter) }
+                      }, null)
+                      return
+                  }
+
+                  if (acts.isEmpty()) {
+                      stopRun()
+                      return
+                  }
+                  if (idx >= acts.size) {
+                      idx = 0
+                      cycles++
+                      val maxRep = Prefs.get(this, "repeats")
+                      if (maxRep > 0 && cycles >= maxRep) {
+                          stopRun()
+                          toast("Ciclo concluído!")
+                          return
+                      }
+                  }
+                  val act = acts[idx]
+                  idx++
+                  val gen = runGen
+
+                  val dm = resources.displayMetrics
+                  val maxX = (dm.widthPixels - 1).toFloat()
+                  val maxY = (dm.heightPixels - 1).toFloat()
+
+                  val c1 = centerOf(act.a)
+                  val path = Path()
+                  val jitVal = Prefs.get(this, "jitter").toInt()
+                  val jX = if (jitVal > 0) Random.nextInt(-jitVal, jitVal + 1) else 0
+                  val jY = if (jitVal > 0) Random.nextInt(-jitVal, jitVal + 1) else 0
+
+                  path.moveTo((c1.first + jX).coerceIn(0f, maxX), (c1.second + jY).coerceIn(0f, maxY))
+                  var dur = if (act.customDuration > 0) act.customDuration else if (act.swipe) Prefs.get(this, "swipeDur") else Prefs.get(this, "tapDur")
+
+                  val endMarker = act.b
+                  if (act.swipe && endMarker != null) {
+                      val c2 = centerOf(endMarker)
+                      path.lineTo((c2.first + jX).coerceIn(0f, maxX), (c2.second + jY).coerceIn(0f, maxY))
+                  }
+                  if (dur < 1) dur = 1
+
+                  val gesture = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(path, 0, dur))
+                      .build()
+
+                  dispatchGesture(gesture, object : GestureResultCallback() {
+                      override fun onCompleted(g: GestureDescription?) { nextPoint(gen) }
+                      override fun onCancelled(g: GestureDescription?) { nextPoint(gen) }
+                  }, null)
+              }
+
+              private fun nextPoint(gen: Int) {
+                  if (gen == runGen && running) {
+                      var d = Prefs.get(this, "interval")
+                      val rnd = Prefs.get(this, "random")
+                      if (rnd > 0) d += Random.nextLong(-rnd, rnd + 1)
+                      if (d < 10) d = 10
+                      handler.postDelayed({ step() }, d)
+                  }
+              }
+
+              private fun nextMacro(gen: Int, delay: Long) {
+                  if (gen == runGen && running) {
+                      handler.postDelayed({ step() }, delay.coerceAtLeast(10L))
+                  }
+              }
+
+              private fun centerOf(v: View): Pair<Float, Float> {
+                  val lp = lpOf(v)
+                  val half = markerSize() / 2
+                  return Pair((lp.x + half).toFloat(), (lp.y + half).toFloat())
+              }
+          }
+          KT_EOF
+
+      - name: Aceitar licencas do Android SDK
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Compilar APK Assinado (Release)
+        run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Publicar APK Confiável
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk AutoClickerPro-Trusted.apk
+          sha256sum AutoClickerPro-Trusted.apk > AutoClickerPro-Trusted.sha256
+          gh release create "v${{ github.run_number }}" AutoClickerPro-Trusted.apk AutoClickerPro-Trusted.sha256 \
+            --title "Auto Clicker Pro v${{ github.run_number }} [Signed & Trusted]" \
+            --notes "Versão assinada, otimizada com ProGuard, gravador de macros, shake-to-stop, limite de tempo, parada ao desligar a tela e bloqueio de apps sensíveis. Hash SHA-256 incluso para verificar a integridade."
