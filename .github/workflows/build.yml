@@ -1,4 +1,5 @@
-name: Build APK Confiável
+name: -keep class com.meu.autoclicker.** { *; }
+
 on:
   push:
     branches: [main, master]
