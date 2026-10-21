@@ -1,0 +1,752 @@
+Name: Build APK
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Criar projeto Android
+        run: |
+          mkdir -p app/src/main/java/com/meu/autoclicker app/src/main/res/xml app/src/main/res/values
+          cat > settings.gradle.kts <<'KT_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AutoClicker"
+          include(":app")
+          KT_EOF
+          cat > build.gradle.kts <<'KT_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          KT_EOF
+          cat > gradle.properties <<'KT_EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          KT_EOF
+          cat > app/build.gradle.kts <<'KT_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.meu.autoclicker"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.meu.autoclicker"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          KT_EOF
+          cat > app/src/main/AndroidManifest.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/ic_menu_compass"
+                  android:label="Auto Clicker"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ClickService"
+                      android:exported="true"
+                      android:label="Auto Clicker"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          KT_EOF
+          cat > app/src/main/res/xml/accessibility_config.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeAllMask"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canPerformGestures="true"
+              android:description="@string/service_desc"
+              android:notificationTimeout="100" />
+          KT_EOF
+          cat > app/src/main/res/values/strings.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="service_desc">Permite que o Auto Clicker toque e deslize na tela por você, nos pontos que você escolher.</string>
+          </resources>
+          KT_EOF
+          cat > app/src/main/java/com/meu/autoclicker/Prefs.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.content.Context
+
+          object Prefs {
+              // chave, rótulo, valor padrão
+              val fields = listOf(
+                  Triple("interval", "Intervalo entre toques (ms)", 500L),
+                  Triple("random", "Variação aleatória do intervalo (± ms)", 0L),
+                  Triple("repeats", "Repetições do ciclo (0 = infinito)", 0L),
+                  Triple("tapDur", "Duração do toque (ms) - aumente para toque longo", 50L),
+                  Triple("swipeDur", "Duração do deslize (ms)", 400L),
+                  Triple("startDelay", "Atraso antes de começar (ms)", 1000L),
+                  Triple("jitter", "Variação aleatória da posição (± pixels)", 0L)
+              )
+
+              private fun sp(c: Context) = c.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+
+              fun get(c: Context, key: String): Long {
+                  val def = fields.first { it.first == key }.third
+                  return sp(c).getLong(key, def)
+              }
+
+              fun set(c: Context, key: String, v: Long) {
+                  sp(c).edit().putLong(key, v).apply()
+              }
+          }
+          KT_EOF
+          cat > app/src/main/java/com/meu/autoclicker/MainActivity.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              private val inputs = LinkedHashMap<String, EditText>()
+              private lateinit var status: TextView
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val scroll = ScrollView(this)
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(20), dp(40), dp(20), dp(30))
+                  scroll.addView(root)
+                  setContentView(scroll)
+
+                  val title = TextView(this)
+                  title.text = "Auto Clicker"
+                  title.textSize = 28f
+                  title.setTextColor(Color.WHITE)
+                  root.addView(title)
+
+                  status = TextView(this)
+                  status.textSize = 16f
+                  status.setPadding(0, dp(10), 0, dp(10))
+                  root.addView(status)
+
+                  val b1 = Button(this)
+                  b1.text = "1. Ativar serviço de acessibilidade"
+                  b1.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  root.addView(b1)
+
+                  val help = TextView(this)
+                  help.text = "Em Acessibilidade, procure por Auto Clicker (pode estar em Apps instalados) e ligue. " +
+                      "Se o Android disser configuração restrita: Configurações > Apps > Auto Clicker > menu de 3 pontinhos > Permitir configurações restritas."
+                  help.textSize = 13f
+                  help.setPadding(0, dp(6), 0, dp(14))
+                  root.addView(help)
+
+                  for (f in Prefs.fields) {
+                      val label = TextView(this)
+                      label.text = f.second
+                      label.textSize = 14f
+                      label.setPadding(0, dp(8), 0, 0)
+                      root.addView(label)
+
+                      val et = EditText(this)
+                      et.inputType = InputType.TYPE_CLASS_NUMBER
+                      et.setText(Prefs.get(this, f.first).toString())
+                      root.addView(et)
+                      inputs[f.first] = et
+                  }
+
+                  val save = Button(this)
+                  save.text = "Salvar configurações"
+                  save.setOnClickListener {
+                      saveAll()
+                      Toast.makeText(this, "Salvo!", Toast.LENGTH_SHORT).show()
+                  }
+                  root.addView(save)
+
+                  val b2 = Button(this)
+                  b2.text = "2. Abrir painel flutuante"
+                  b2.setOnClickListener {
+                      saveAll()
+                      val s = ClickService.instance
+                      if (s == null) {
+                          Toast.makeText(this, "Ative o serviço de acessibilidade primeiro", Toast.LENGTH_LONG).show()
+                      } else {
+                          s.showPanel()
+                          moveTaskToBack(true)
+                      }
+                  }
+                  root.addView(b2)
+
+                  val how = TextView(this)
+                  how.text = "\nComo usar o painel:\n" +
+                      "☰ arrastar o painel\n" +
+                      "▶/⏸ iniciar e pausar\n" +
+                      "👆 adicionar ponto de toque\n" +
+                      "↔ adicionar deslize (arraste A e B)\n" +
+                      "🗑 apagar o último (segure para apagar todos)\n" +
+                      "⚙ abrir configurações\n" +
+                      "✕ fechar o painel\n\n" +
+                      "Arraste as bolinhas numeradas até onde quer clicar. Os pontos rodam em ordem, em ciclo."
+                  how.textSize = 14f
+                  root.addView(how)
+              }
+
+              private fun saveAll() {
+                  for (f in Prefs.fields) {
+                      val v = inputs[f.first]?.text?.toString()?.toLongOrNull() ?: f.third
+                      Prefs.set(this, f.first, v)
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (ClickService.instance != null) {
+                      status.text = "Serviço: ATIVO ✔"
+                      status.setTextColor(Color.rgb(102, 220, 120))
+                  } else {
+                      status.text = "Serviço: desativado ✖"
+                      status.setTextColor(Color.rgb(255, 120, 100))
+                  }
+              }
+          }
+          KT_EOF
+          cat > app/src/main/java/com/meu/autoclicker/ClickService.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import kotlin.random.Random
+
+          class ClickService : AccessibilityService() {
+
+              companion object {
+                  @Volatile
+                  var instance: ClickService? = null
+              }
+
+              class Act(val swipe: Boolean, val a: TextView, val b: TextView?)
+
+              private lateinit var wm: WindowManager
+              private val handler = Handler(Looper.getMainLooper())
+              private val acts = ArrayList<Act>()
+
+              private var panel: View? = null
+              private var playBtn: TextView? = null
+
+              private var running = false
+              private var runGen = 0
+              private var idx = 0
+              private var cycles = 0
+
+              private var interval = 500L
+              private var randomMs = 0L
+              private var repeats = 0L
+              private var tapDur = 50L
+              private var swipeDur = 400L
+              private var startDelay = 1000L
+              private var jitter = 0L
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun markerSize() = dp(52)
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {
+                  stopRun()
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  closeAll()
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              override fun onDestroy() {
+                  instance = null
+                  super.onDestroy()
+              }
+
+              // ---------- Painel flutuante ----------
+
+              private fun tv(t: String): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = 20f
+                  v.setTextColor(Color.WHITE)
+                  v.setPadding(dp(10), dp(6), dp(10), dp(6))
+                  return v
+              }
+
+              fun showPanel() {
+                  if (panel != null) return
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  val bg = GradientDrawable()
+                  bg.setColor(Color.argb(235, 30, 30, 30))
+                  bg.cornerRadius = dp(28).toFloat()
+                  row.background = bg
+                  row.setPadding(dp(6), dp(4), dp(6), dp(4))
+
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(16)
+                  lp.y = dp(200)
+
+                  val handle = tv("☰")
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+                  handle.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX
+                              downY = e.rawY
+                              startX = lp.x
+                              startY = lp.y
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = startX + (e.rawX - downX).toInt()
+                              lp.y = startY + (e.rawY - downY).toInt()
+                              try {
+                                  wm.updateViewLayout(row, lp)
+                              } catch (ex: Exception) {
+                              }
+                          }
+                      }
+                      true
+                  }
+                  row.addView(handle)
+
+                  val play = tv("▶")
+                  play.setOnClickListener { if (running) stopRun() else startRun() }
+                  playBtn = play
+                  row.addView(play)
+
+                  val tap = tv("👆")
+                  tap.setOnClickListener { addTap() }
+                  row.addView(tap)
+
+                  val swipe = tv("↔")
+                  swipe.setOnClickListener { addSwipe() }
+                  row.addView(swipe)
+
+                  val del = tv("🗑")
+                  del.setOnClickListener { removeLast() }
+                  del.setOnLongClickListener {
+                      clearAll()
+                      toast("Todos os pontos apagados")
+                      true
+                  }
+                  row.addView(del)
+
+                  val cfg = tv("⚙")
+                  cfg.setOnClickListener {
+                      val i = Intent(this, MainActivity::class.java)
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(i)
+                  }
+                  row.addView(cfg)
+
+                  val close = tv("✕")
+                  close.setOnClickListener { closeAll() }
+                  row.addView(close)
+
+                  wm.addView(row, lp)
+                  panel = row
+              }
+
+              private fun hidePanel() {
+                  val p = panel
+                  if (p != null) {
+                      try {
+                          wm.removeView(p)
+                      } catch (e: Exception) {
+                      }
+                  }
+                  panel = null
+                  playBtn = null
+              }
+
+              private fun closeAll() {
+                  stopRun()
+                  clearAll()
+                  hidePanel()
+              }
+
+              private fun toast(t: String) {
+                  Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+              }
+
+              // ---------- Marcadores ----------
+
+              private fun makeMarker(label: String, color: Int, x: Int, y: Int): TextView {
+                  val size = markerSize()
+                  val m = TextView(this)
+                  m.text = label
+                  m.setTextColor(Color.WHITE)
+                  m.textSize = 15f
+                  m.typeface = Typeface.DEFAULT_BOLD
+                  m.gravity = Gravity.CENTER
+                  val bg = GradientDrawable()
+                  bg.shape = GradientDrawable.OVAL
+                  bg.setColor(color)
+                  bg.setStroke(dp(2), Color.WHITE)
+                  m.background = bg
+                  m.alpha = 0.85f
+
+                  val lp = WindowManager.LayoutParams(
+                      size,
+                      size,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = x
+                  lp.y = y
+                  m.tag = lp
+
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+                  m.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX
+                              downY = e.rawY
+                              startX = lp.x
+                              startY = lp.y
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = startX + (e.rawX - downX).toInt()
+                              lp.y = startY + (e.rawY - downY).toInt()
+                              try {
+                                  wm.updateViewLayout(m, lp)
+                              } catch (ex: Exception) {
+                              }
+                          }
+                      }
+                      true
+                  }
+                  wm.addView(m, lp)
+                  return m
+              }
+
+              private fun lpOf(v: View): WindowManager.LayoutParams {
+                  return v.tag as WindowManager.LayoutParams
+              }
+
+              private fun addTap() {
+                  if (running) {
+                      toast("Pause antes de adicionar pontos")
+                      return
+                  }
+                  val n = acts.size + 1
+                  val dm = resources.displayMetrics
+                  val size = markerSize()
+                  val off = (n % 5) * dp(20)
+                  val x = dm.widthPixels / 2 - size / 2 + off
+                  val y = dm.heightPixels / 2 - size / 2 + off
+                  val m = makeMarker(n.toString(), Color.rgb(33, 150, 243), x, y)
+                  acts.add(Act(false, m, null))
+              }
+
+              private fun addSwipe() {
+                  if (running) {
+                      toast("Pause antes de adicionar pontos")
+                      return
+                  }
+                  val n = acts.size + 1
+                  val dm = resources.displayMetrics
+                  val size = markerSize()
+                  val x = dm.widthPixels / 2 - size / 2
+                  val y = dm.heightPixels / 2 - size / 2
+                  val a = makeMarker(n.toString() + "A", Color.rgb(76, 175, 80), x, y - dp(110))
+                  val b = makeMarker(n.toString() + "B", Color.rgb(244, 67, 54), x, y + dp(110))
+                  acts.add(Act(true, a, b))
+              }
+
+              private fun removeView(v: View?) {
+                  if (v == null) return
+                  try {
+                      wm.removeView(v)
+                  } catch (e: Exception) {
+                  }
+              }
+
+              private fun removeLast() {
+                  if (running) {
+                      toast("Pause antes de apagar")
+                      return
+                  }
+                  if (acts.isEmpty()) return
+                  val last = acts.removeAt(acts.size - 1)
+                  removeView(last.a)
+                  removeView(last.b)
+              }
+
+              private fun clearAll() {
+                  for (a in acts) {
+                      removeView(a.a)
+                      removeView(a.b)
+                  }
+                  acts.clear()
+              }
+
+              private fun setMarkersRunning(on: Boolean) {
+                  for (a in acts) {
+                      val views = listOf<View?>(a.a, a.b)
+                      for (v in views) {
+                          if (v == null) continue
+                          val lp = lpOf(v)
+                          if (on) {
+                              lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                              v.alpha = 0.3f
+                          } else {
+                              lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                              v.alpha = 0.85f
+                          }
+                          try {
+                              wm.updateViewLayout(v, lp)
+                          } catch (e: Exception) {
+                          }
+                      }
+                  }
+              }
+
+              // ---------- Execução ----------
+
+              private fun startRun() {
+                  if (acts.isEmpty()) {
+                      toast("Adicione um ponto primeiro (👆 ou ↔)")
+                      return
+                  }
+                  interval = Prefs.get(this, "interval")
+                  randomMs = Prefs.get(this, "random")
+                  repeats = Prefs.get(this, "repeats")
+                  tapDur = Prefs.get(this, "tapDur")
+                  swipeDur = Prefs.get(this, "swipeDur")
+                  startDelay = Prefs.get(this, "startDelay")
+                  jitter = Prefs.get(this, "jitter")
+
+                  runGen++
+                  running = true
+                  idx = 0
+                  cycles = 0
+                  playBtn?.text = "⏸"
+                  setMarkersRunning(true)
+                  handler.postDelayed({ step() }, startDelay)
+              }
+
+              private fun stopRun() {
+                  running = false
+                  runGen++
+                  handler.removeCallbacksAndMessages(null)
+                  playBtn?.text = "▶"
+                  setMarkersRunning(false)
+              }
+
+              private fun nextDelay(): Long {
+                  var d = interval
+                  if (randomMs > 0) {
+                      d += Random.nextLong(-randomMs, randomMs + 1)
+                  }
+                  if (d < 10) d = 10
+                  return d
+              }
+
+              private fun jit(): Float {
+                  if (jitter <= 0) return 0f
+                  val j = jitter.toInt()
+                  return Random.nextInt(-j, j + 1).toFloat()
+              }
+
+              private fun centerOf(v: View): Pair<Float, Float> {
+                  val lp = lpOf(v)
+                  val half = markerSize() / 2
+                  return Pair((lp.x + half).toFloat(), (lp.y + half).toFloat())
+              }
+
+              private fun step() {
+                  if (!running) return
+                  if (acts.isEmpty()) {
+                      stopRun()
+                      return
+                  }
+                  if (idx >= acts.size) {
+                      idx = 0
+                      cycles++
+                      if (repeats > 0 && cycles >= repeats) {
+                          stopRun()
+                          toast("Concluído")
+                          return
+                      }
+                  }
+                  val act = acts[idx]
+                  idx++
+                  val gen = runGen
+
+                  val dm = resources.displayMetrics
+                  val maxX = (dm.widthPixels - 1).toFloat()
+                  val maxY = (dm.heightPixels - 1).toFloat()
+
+                  val c1 = centerOf(act.a)
+                  val path = Path()
+                  path.moveTo((c1.first + jit()).coerceIn(0f, maxX), (c1.second + jit()).coerceIn(0f, maxY))
+                  var dur = tapDur
+                  if (act.swipe && act.b != null) {
+                      val c2 = centerOf(act.b)
+                      path.lineTo((c2.first + jit()).coerceIn(0f, maxX), (c2.second + jit()).coerceIn(0f, maxY))
+                      dur = swipeDur
+                  }
+                  if (dur < 1) dur = 1
+
+                  val gesture = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(path, 0, dur))
+                      .build()
+
+                  val cb = object : AccessibilityService.GestureResultCallback() {
+                      override fun onCompleted(gestureDescription: GestureDescription?) {
+                          next(gen)
+                      }
+
+                      override fun onCancelled(gestureDescription: GestureDescription?) {
+                          next(gen)
+                      }
+                  }
+
+                  val ok = dispatchGesture(gesture, cb, null)
+                  if (!ok) {
+                      stopRun()
+                      toast("Não foi possível executar o toque")
+                  }
+              }
+
+              private fun next(gen: Int) {
+                  if (gen == runGen && running) {
+                      handler.postDelayed({ step() }, nextDelay())
+                  }
+              }
+          }
+          KT_EOF
+      - name: Aceitar licencas do Android SDK
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Compilar
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Publicar APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk AutoClicker.apk
+          gh release create "v${{ github.run_number }}" AutoClicker.apk --title "Auto Clicker v${{ github.run_number }}" --notes "APK pronto para instalar"
+
+              
