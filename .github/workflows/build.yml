@@ -16,7 +16,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: 1. Criar arquivos de configuração e Prefs
+      - name: Passo 1 - Estrutura e Configurações Gradle
         run: |
           mkdir -p app/src/main/java/com/meu/autoclicker app/src/main/res/xml app/src/main/res/values
           cat > settings.gradle.kts <<'KT_EOF'
@@ -74,6 +74,8 @@ jobs:
               }
           }
           KT_EOF
+                - name: Passo 2 - Manifest, XML e Prefs.kt
+        run: |
           cat > app/src/main/AndroidManifest.xml <<'KT_EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -151,7 +153,8 @@ jobs:
                   sp(c).edit().putLong(key, v).apply()
               }
           }
-                - name: 2. Criar tela principal (MainActivity)
+          KT_EOF
+                - name: Passo 3 - MainActivity.kt
         run: |
           cat > app/src/main/java/com/meu/autoclicker/MainActivity.kt <<'KT_EOF'
           package com.meu.autoclicker
@@ -280,7 +283,7 @@ jobs:
               }
           }
           KT_EOF
-                - name: 3. Criar ClickService, Compilar e Publicar
+                - name: Passo 4 - ClickService, Licenças, Compilação e Publicação
         run: |
           cat > app/src/main/java/com/meu/autoclicker/ClickService.kt <<'KT_EOF'
           package com.meu.autoclicker
@@ -732,20 +735,17 @@ jobs:
               }
           }
           KT_EOF
-      - name: Aceitar licencas do Android SDK
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Compilar
-        run: gradle assembleDebug --no-daemon --stacktrace
-      - name: Publicar APK
+      - name: Passo 5 - Compilar e Publicar APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          gradle assembleDebug --no-daemon --stacktrace
           cp app/build/outputs/apk/debug/app-debug.apk AutoClicker.apk
           gh release create "v${{ github.run_number }}" AutoClicker.apk --title "Auto Clicker v${{ github.run_number }}" --notes "APK pronto para instalar"
           
           
-          KT_EOF
